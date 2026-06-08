@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WatchParty Room</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+</head>
+<body class="room">
+  <!-- Name prompt overlay -->
+  <div id="nameModal" class="modal">
+    <div class="modal-box">
+      <div class="logo small">🍿 WatchParty</div>
+      <h2>Pick a name</h2>
+      <p>This is how others in the party will see you.</p>
+      <form id="nameForm">
+        <input id="nameInput" type="text" maxlength="24" placeholder="Your name" autocomplete="off" />
+        <button type="submit" class="btn btn-primary">Join party</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="app" id="app" hidden>
+    <header class="topbar">
+      <div class="logo small">🍿 WatchParty</div>
+      <div class="topbar-right">
+        <div id="hostOnlyWrap" class="host-toggle" hidden>
+          <label><input type="checkbox" id="hostOnly" /> Host-only control</label>
+        </div>
+        <button id="inviteBtn" class="btn btn-primary">🔗 Invite</button>
+      </div>
+    </header>
+
+    <div class="stage">
+      <section class="player-col">
+        <div id="videoWrap" class="video-wrap">
+          <div id="player"></div>
+          <video id="fileVideo" hidden controls playsinline></video>
+          <div id="emptyState" class="empty-state">
+            <div class="empty-inner">
+              <div class="big">🎬</div>
+              <h3>No video loaded yet</h3>
+              <p>Paste a YouTube link or a direct video URL below to start the party.</p>
+            </div>
+          </div>
+          <div id="reactionLayer" class="reaction-layer"></div>
+        </div>
+
+        <div class="source-bar">
+          <input id="sourceInput" type="text" placeholder="Paste a YouTube link, video ID, or .mp4 URL…" autocomplete="off" />
+          <button id="loadBtn" class="btn btn-primary">Load</button>
+        </div>
+
+        <div class="reactions">
+          <button data-emoji="😂">😂</button>
+          <button data-emoji="❤️">❤️</button>
+          <button data-emoji="😮">😮</button>
+          <button data-emoji="🔥">🔥</button>
+          <button data-emoji="👏">👏</button>
+          <button data-emoji="😢">😢</button>
+          <button data-emoji="🎉">🎉</button>
+        </div>
+      </section>
+
+      <aside class="chat-col">
+        <div class="chat-head">
+          <span id="userCount">1 watching</span>
+          <div id="userChips" class="user-chips"></div>
+        </div>
+        <div id="messages" class="messages"></div>
+        <div id="typingIndicator" class="typing"></div>
+        <form id="chatForm" class="chat-form">
+          <input id="chatInput" type="text" placeholder="Send a message…" autocomplete="off" maxlength="500" />
+          <button type="submit" class="btn btn-primary send">➤</button>
+        </form>
+      </aside>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="/js/room.js"></script>
+</body>
+</html>

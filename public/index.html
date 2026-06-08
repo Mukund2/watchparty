@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WatchParty — Watch together, in sync</title>
+  <link rel="stylesheet" href="/css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+</head>
+<body class="landing">
+  <div class="bg-glow"></div>
+
+  <main class="hero">
+    <div class="logo">🍿 WatchParty</div>
+    <h1>Watch together,<br /><span class="accent">perfectly in sync.</span></h1>
+    <p class="sub">
+      Spin up a room, drop a YouTube or video link, and share the URL.
+      Play, pause and seek stay locked across everyone — with live chat and reactions.
+    </p>
+
+    <div class="cards">
+      <div class="card">
+        <h2>Start a party</h2>
+        <p>Create a fresh room and invite your friends with one link.</p>
+        <button id="createBtn" class="btn btn-primary">Create a room →</button>
+      </div>
+
+      <div class="card">
+        <h2>Join a party</h2>
+        <p>Got a room code or link? Hop straight in.</p>
+        <form id="joinForm" class="join-form">
+          <input id="joinInput" type="text" placeholder="Room code or link" autocomplete="off" />
+          <button type="submit" class="btn btn-ghost">Join</button>
+        </form>
+        <div id="joinError" class="error"></div>
+      </div>
+    </div>
+
+    <div class="features">
+      <div class="feat"><span>⚡</span> Real-time sync</div>
+      <div class="feat"><span>💬</span> Live chat</div>
+      <div class="feat"><span>😂</span> Emoji reactions</div>
+      <div class="feat"><span>🎬</span> YouTube &amp; direct video</div>
+    </div>
+  </main>
+
+  <footer>Built as a Teleparty clone · open a room and share the link</footer>
+
+  <script>
+    document.getElementById("createBtn").addEventListener("click", () => {
+      window.location.href = "/create";
+    });
+
+    document.getElementById("joinForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const raw = document.getElementById("joinInput").value.trim();
+      const err = document.getElementById("joinError");
+      err.textContent = "";
+      if (!raw) return;
+
+      // Accept either a bare code or a full room URL.
+      let code = raw;
+      try {
+        if (raw.includes("room=")) {
+          code = new URL(raw, window.location.origin).searchParams.get("room");
+        } else if (raw.includes("/")) {
+          const parts = raw.split("/").filter(Boolean);
+          code = parts[parts.length - 1].replace(/^room\.html\?room=/, "");
+        }
+      } catch (_) { /* fall through with raw */ }
+
+      const res = await fetch(`/api/room/${encodeURIComponent(code)}`);
+      const data = await res.json();
+      if (data.exists) {
+        window.location.href = `/room.html?room=${encodeURIComponent(code)}`;
+      } else {
+        err.textContent = "That room doesn't exist (or expired). Try creating one!";
+      }
+    });
+  </script>
+</body>
+</html>

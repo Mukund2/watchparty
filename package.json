@@ -1,0 +1,16 @@
+{
+  "name": "watchparty",
+  "version": "1.0.0",
+  "description": "A Teleparty clone — synchronized video watch parties with live chat",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "nanoid": "^5.0.7",
+    "socket.io": "^4.7.5"
+  }
+}
