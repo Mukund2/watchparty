@@ -126,6 +126,9 @@ function parseSource(input) {
 function applySource(source) {
   if (!source) return;
   document.getElementById("emptyState").style.display = "none";
+  // A real video supersedes any screen-share view.
+  document.getElementById("screenVideo").hidden = true;
+  document.getElementById("screenWaiting").hidden = true;
 
   if (source.type === "youtube") {
     activeKind = "youtube";
@@ -240,8 +243,188 @@ socket.on("emoji", ({ emoji }) => floatEmoji(emoji));
 /* ------------------------------------------------------------------ */
 
 setInterval(() => {
-  if (activeKind) requestResync();
+  // Screen shares are live — there's no timeline to drift-correct.
+  if (activeKind && activeKind !== "screen") requestResync();
 }, 5000);
+
+/* ------------------------------------------------------------------ */
+/* Screen sharing (WebRTC mesh; the server only relays signaling)      */
+/* ------------------------------------------------------------------ */
+
+const RTC_CONFIG = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ],
+};
+
+const screenVideo = document.getElementById("screenVideo");
+let localScreenStream = null;
+let isSharing = false;
+const peers = new Map(); // peerId -> { pc, pending: RTCIceCandidate[] }
+const screenSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia);
+
+function ensurePeer(peerId) {
+  let entry = peers.get(peerId);
+  if (entry) return entry;
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  entry = { pc, pending: [] };
+  peers.set(peerId, entry);
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) socket.emit("webrtc-ice", { to: peerId, candidate: e.candidate });
+  };
+  // Viewer side: the sharer's track arrives here.
+  pc.ontrack = (e) => {
+    screenVideo.srcObject = e.streams[0];
+    activeKind = "screen";
+    showScreenStage(false);
+  };
+  return entry;
+}
+
+async function flushPending(entry) {
+  for (const c of entry.pending) {
+    try { await entry.pc.addIceCandidate(c); } catch (_) {}
+  }
+  entry.pending = [];
+}
+
+async function createOfferTo(peerId) {
+  if (!localScreenStream) return;
+  const { pc } = ensurePeer(peerId);
+  localScreenStream.getTracks().forEach((t) => {
+    if (!pc.getSenders().some((s) => s.track === t)) pc.addTrack(t, localScreenStream);
+  });
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit("webrtc-offer", { to: peerId, sdp: offer });
+}
+
+async function startScreenShare() {
+  if (!screenSupported) { toast("Your browser can't share a screen here"); return; }
+  if (hostOnly && !isHost) { toast("Only the host can share right now"); return; }
+
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 30 },
+      audio: true, // captures tab audio in Chrome when sharing a tab
+    });
+  } catch (err) {
+    if (err && err.name !== "NotAllowedError") toast("Couldn't start screen share");
+    return; // user cancelled the picker
+  }
+
+  localScreenStream = stream;
+  isSharing = true;
+  activeKind = "screen";
+  setShareButton(true);
+
+  // Local preview — muted so we don't echo our own audio.
+  screenVideo.srcObject = stream;
+  screenVideo.muted = true;
+  showScreenStage(false);
+
+  // The browser's native "Stop sharing" bar fires this.
+  stream.getVideoTracks()[0].addEventListener("ended", stopScreenShare);
+
+  socket.emit("screen-start");
+  currentUserIds().filter((id) => id !== me?.id).forEach(createOfferTo);
+}
+
+function stopScreenShare() {
+  if (!isSharing) return;
+  isSharing = false;
+  setShareButton(false);
+  if (localScreenStream) {
+    localScreenStream.getTracks().forEach((t) => t.stop());
+    localScreenStream = null;
+  }
+  teardownPeers();
+  screenVideo.srcObject = null;
+  activeKind = null;
+  socket.emit("screen-stop");
+  showEmpty();
+}
+
+function teardownPeers() {
+  peers.forEach(({ pc }) => { try { pc.close(); } catch (_) {} });
+  peers.clear();
+}
+
+/* ---- signaling ---- */
+
+socket.on("viewer-joined", ({ viewerId }) => {
+  if (isSharing) createOfferTo(viewerId);
+});
+
+socket.on("webrtc-offer", async ({ from, sdp }) => {
+  // We're a viewer receiving the sharer's offer.
+  const entry = ensurePeer(from);
+  await entry.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  await flushPending(entry);
+  const answer = await entry.pc.createAnswer();
+  await entry.pc.setLocalDescription(answer);
+  socket.emit("webrtc-answer", { to: from, sdp: answer });
+  screenVideo.muted = false;
+});
+
+socket.on("webrtc-answer", async ({ from, sdp }) => {
+  const entry = peers.get(from);
+  if (!entry) return;
+  await entry.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  await flushPending(entry);
+});
+
+socket.on("webrtc-ice", async ({ from, candidate }) => {
+  const entry = peers.get(from);
+  if (!entry || !candidate) return;
+  const c = new RTCIceCandidate(candidate);
+  if (entry.pc.remoteDescription && entry.pc.remoteDescription.type) {
+    try { await entry.pc.addIceCandidate(c); } catch (_) {}
+  } else {
+    entry.pending.push(c); // buffer until remote description is set
+  }
+});
+
+socket.on("screen-started", ({ sharerId, name }) => {
+  if (sharerId === me?.id) return; // we're the sharer
+  activeKind = "screen";
+  showScreenStage(true);
+  document.getElementById("screenWaitingText").textContent = `${name} is sharing their screen`;
+});
+
+socket.on("screen-stopped", ({ sharerId }) => {
+  teardownPeers();
+  screenVideo.srcObject = null;
+  if (sharerId === me?.id) { isSharing = false; setShareButton(false); }
+  if (activeKind === "screen") { activeKind = null; showEmpty(); }
+});
+
+/* ---- visibility helpers ---- */
+
+function showScreenStage(waiting) {
+  document.getElementById("emptyState").style.display = "none";
+  document.getElementById("player").style.display = "none";
+  fileVideo.hidden = true;
+  screenVideo.hidden = false;
+  document.getElementById("screenWaiting").hidden = !waiting;
+}
+
+function showEmpty() {
+  screenVideo.hidden = true;
+  document.getElementById("screenWaiting").hidden = true;
+  document.getElementById("player").style.display = "none";
+  fileVideo.hidden = true;
+  if (!lastSourceValue) document.getElementById("emptyState").style.display = "flex";
+}
+
+function setShareButton(on) {
+  const btn = document.getElementById("shareScreenBtn");
+  btn.textContent = on ? "🛑 Stop sharing" : "🖥️ Share screen";
+  btn.classList.toggle("sharing", on);
+}
 
 /* ------------------------------------------------------------------ */
 /* UI wiring                                                           */
@@ -264,7 +447,15 @@ document.getElementById("nameForm").addEventListener("submit", (e) => {
     nameModal.style.display = "none";
     app.hidden = false;
     renderUsers(res.users);
-    if (res.state.source) applyState(res.state);
+    if (res.state.screenActive) {
+      activeKind = "screen";
+      const sharer = res.users.find((u) => u.id === res.state.screenSharerId);
+      showScreenStage(true);
+      document.getElementById("screenWaitingText").textContent =
+        `${sharer?.name || "Someone"} is sharing their screen`;
+    } else if (res.state.source) {
+      applyState(res.state);
+    }
     reflectHostOnly();
   });
 });
@@ -288,6 +479,13 @@ function loadSource() {
   socket.emit("set-source", source);
   input.value = "";
 }
+
+const shareScreenBtn = document.getElementById("shareScreenBtn");
+if (!screenSupported) shareScreenBtn.style.display = "none";
+shareScreenBtn.addEventListener("click", () => {
+  if (isSharing) stopScreenShare();
+  else startScreenShare();
+});
 
 document.getElementById("inviteBtn").addEventListener("click", async () => {
   const url = location.href;
@@ -335,7 +533,13 @@ document.querySelectorAll(".reactions button").forEach((btn) => {
 /* Rendering helpers                                                   */
 /* ------------------------------------------------------------------ */
 
+let roomUsers = [];
+function currentUserIds() {
+  return roomUsers.map((u) => u.id);
+}
+
 function renderUsers(users) {
+  roomUsers = users;
   isHost = users.find((u) => u.id === me?.id)?.isHost || false;
   const count = users.length;
   document.getElementById("userCount").textContent =

@@ -54,6 +54,7 @@ function makeRoom(id) {
     // Everyone-controls vs host-only.
     hostOnly: false,
     hostId: null,
+    screenSharerId: null,  // socketId currently sharing their screen (WebRTC), if any
     users: new Map(),      // socketId -> { name, color }
     colorIdx: 0,
   };
@@ -74,6 +75,8 @@ function roomStateForClient(room) {
     playbackRate: room.playbackRate,
     hostOnly: room.hostOnly,
     hostId: room.hostId,
+    screenActive: !!room.screenSharerId,
+    screenSharerId: room.screenSharerId,
     serverNow: Date.now(),
   };
 }
@@ -125,6 +128,12 @@ io.on("connection", (socket) => {
 
     socket.to(rid).emit("system", { text: `${cleanName} joined the party` });
     io.to(rid).emit("users", userList(room));
+
+    // If someone is already sharing their screen, tell the sharer to open a
+    // peer connection to this newcomer (the sharer is always the WebRTC offerer).
+    if (room.screenSharerId && room.screenSharerId !== socket.id) {
+      io.to(room.screenSharerId).emit("viewer-joined", { viewerId: socket.id });
+    }
   });
 
   // Play / pause / seek / rate changes coming from a participant.
@@ -165,6 +174,13 @@ io.on("connection", (socket) => {
     if (!room || !canControl(room, socket.id)) return;
     if (!source || !source.type || !source.value) return;
 
+    // Loading a video supersedes any in-progress screen share.
+    if (room.screenSharerId) {
+      const wasSharer = room.screenSharerId;
+      room.screenSharerId = null;
+      io.to(roomId).emit("screen-stopped", { sharerId: wasSharer });
+    }
+
     room.source = { type: source.type, value: String(source.value).slice(0, 2000) };
     room.time = 0;
     room.isPlaying = false;
@@ -190,6 +206,43 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("system", {
       text: room.hostOnly ? "Host enabled host-only control" : "Anyone can control playback now",
     });
+  });
+
+  /* ---- Screen sharing (WebRTC; this server only relays signaling) ---- */
+
+  socket.on("screen-start", () => {
+    const room = rooms.get(roomId);
+    if (!room || !canControl(room, socket.id)) return;
+
+    // One sharer at a time — the new share replaces any current one.
+    room.screenSharerId = socket.id;
+    room.source = null;
+    room.isPlaying = false;
+    room.updatedAt = Date.now();
+
+    const u = room.users.get(socket.id);
+    io.to(roomId).emit("screen-started", { sharerId: socket.id, name: u?.name || "Someone" });
+    io.to(roomId).emit("system", { text: `${u?.name || "Someone"} started sharing their screen` });
+  });
+
+  socket.on("screen-stop", () => {
+    const room = rooms.get(roomId);
+    if (!room || room.screenSharerId !== socket.id) return;
+    room.screenSharerId = null;
+    io.to(roomId).emit("screen-stopped", { sharerId: socket.id });
+    const u = room.users.get(socket.id);
+    io.to(roomId).emit("system", { text: `${u?.name || "Someone"} stopped sharing` });
+  });
+
+  // Relay WebRTC signaling between two specific peers in the room.
+  socket.on("webrtc-offer", ({ to, sdp }) => {
+    if (to) io.to(to).emit("webrtc-offer", { from: socket.id, sdp });
+  });
+  socket.on("webrtc-answer", ({ to, sdp }) => {
+    if (to) io.to(to).emit("webrtc-answer", { from: socket.id, sdp });
+  });
+  socket.on("webrtc-ice", ({ to, candidate }) => {
+    if (to) io.to(to).emit("webrtc-ice", { from: socket.id, candidate });
   });
 
   socket.on("chat", (text) => {
@@ -231,6 +284,12 @@ io.on("connection", (socket) => {
     room.users.delete(socket.id);
 
     if (u) socket.to(roomId).emit("system", { text: `${u.name} left the party` });
+
+    // If the screen-sharer left, end the share for everyone.
+    if (room.screenSharerId === socket.id) {
+      room.screenSharerId = null;
+      socket.to(roomId).emit("screen-stopped", { sharerId: socket.id });
+    }
 
     // Reassign host if the host left.
     if (room.hostId === socket.id) {
