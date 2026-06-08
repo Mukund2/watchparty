@@ -8,11 +8,16 @@ Create a room, drop in a YouTube link or a direct video URL, share the room link
 
 - **Real-time playback sync** — play / pause / seek broadcast to the whole room over WebSockets, with latency compensation and periodic drift correction.
 - **YouTube + direct video** — paste a YouTube link/ID/short, or any `.mp4`/direct video URL.
+- **Screen sharing** — broadcast your screen/tab to the room over WebRTC.
+- **Live video call (FaceTime/Zoom style)** — everyone's webcam + mic in a full-mesh WebRTC call. Face tiles dock in the right sidebar, or pop into a **Zoom-style overlay** on top of the video. Mute mic, turn camera off, and leave anytime; your own tile is always muted (no echo) with echo cancellation on.
+- **Flexible layout** — **collapse the chat** for a full-width player, or **theater mode** to make the watch screen as big as possible.
 - **Live chat** — colored usernames, typing indicators, system join/leave messages.
 - **Emoji reactions** — floating emoji that everyone in the room sees.
 - **Host controls** — first person in is host; optional "host-only control" mode locks playback to the host. Host reassigns automatically if they leave.
 - **Shareable rooms** — one-click invite link copy. Rooms auto-expire shortly after everyone leaves.
 - **Zero install for guests** — it's just a webpage.
+
+> Webcam and screen sharing require **HTTPS** (provided automatically on the Render deployment; works on `localhost` for dev).
 
 ## 🛠 Tech
 

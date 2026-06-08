@@ -55,6 +55,7 @@ function makeRoom(id) {
     hostOnly: false,
     hostId: null,
     screenSharerId: null,  // socketId currently sharing their screen (WebRTC), if any
+    camOn: new Set(),      // socketIds currently in the webcam call (full mesh)
     users: new Map(),      // socketId -> { name, color }
     colorIdx: 0,
   };
@@ -234,7 +235,7 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("system", { text: `${u?.name || "Someone"} stopped sharing` });
   });
 
-  // Relay WebRTC signaling between two specific peers in the room.
+  // Relay WebRTC signaling between two specific peers in the room (screen share).
   socket.on("webrtc-offer", ({ to, sdp }) => {
     if (to) io.to(to).emit("webrtc-offer", { from: socket.id, sdp });
   });
@@ -243,6 +244,37 @@ io.on("connection", (socket) => {
   });
   socket.on("webrtc-ice", ({ to, candidate }) => {
     if (to) io.to(to).emit("webrtc-ice", { from: socket.id, candidate });
+  });
+
+  /* ---- Webcam video call (full-mesh WebRTC; separate from screen share) ---- */
+
+  socket.on("cam-join", () => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    // Tell the newcomer who's already on camera so it can dial them.
+    const existing = [...room.camOn].filter((id) => id !== socket.id);
+    socket.emit("cam-existing", { peers: existing });
+    room.camOn.add(socket.id);
+    // Tell everyone else a new camera came online.
+    socket.to(roomId).emit("cam-user-joined", { id: socket.id });
+  });
+
+  socket.on("cam-leave", () => {
+    const room = rooms.get(roomId);
+    if (!room) return;
+    room.camOn.delete(socket.id);
+    socket.to(roomId).emit("cam-user-left", { id: socket.id });
+  });
+
+  // Per-pair signaling. The peer with the smaller socket id always offers.
+  socket.on("cam-offer", ({ to, sdp }) => {
+    if (to) io.to(to).emit("cam-offer", { from: socket.id, sdp });
+  });
+  socket.on("cam-answer", ({ to, sdp }) => {
+    if (to) io.to(to).emit("cam-answer", { from: socket.id, sdp });
+  });
+  socket.on("cam-ice", ({ to, candidate }) => {
+    if (to) io.to(to).emit("cam-ice", { from: socket.id, candidate });
   });
 
   socket.on("chat", (text) => {
@@ -289,6 +321,12 @@ io.on("connection", (socket) => {
     if (room.screenSharerId === socket.id) {
       room.screenSharerId = null;
       socket.to(roomId).emit("screen-stopped", { sharerId: socket.id });
+    }
+
+    // If they were on the webcam call, tell others to drop their tile.
+    if (room.camOn.has(socket.id)) {
+      room.camOn.delete(socket.id);
+      socket.to(roomId).emit("cam-user-left", { id: socket.id });
     }
 
     // Reassign host if the host left.

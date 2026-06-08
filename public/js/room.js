@@ -427,6 +427,198 @@ function setShareButton(on) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Webcam video call (full-mesh WebRTC, FaceTime/Zoom style)           */
+/* ------------------------------------------------------------------ */
+
+const camSupported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+const videoTiles = document.getElementById("videoTiles");
+let localCamStream = null;
+let inCall = false;
+let micEnabled = true;
+let camEnabled = true;
+let tilesOverlaid = false;
+const camPeers = new Map(); // peerId -> { pc, pending: RTCIceCandidate[] }
+
+function camEnsurePeer(peerId) {
+  let entry = camPeers.get(peerId);
+  if (entry) return entry;
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  entry = { pc, pending: [] };
+  camPeers.set(peerId, entry);
+
+  if (localCamStream) localCamStream.getTracks().forEach((t) => pc.addTrack(t, localCamStream));
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) socket.emit("cam-ice", { to: peerId, candidate: e.candidate });
+  };
+  pc.ontrack = (e) => upsertTile(peerId, e.streams[0], false);
+  pc.onconnectionstatechange = () => {
+    if (["failed", "closed"].includes(pc.connectionState)) removeCamPeer(peerId);
+  };
+  return entry;
+}
+
+async function camFlush(entry) {
+  for (const c of entry.pending) { try { await entry.pc.addIceCandidate(c); } catch (_) {} }
+  entry.pending = [];
+}
+
+async function camOfferTo(peerId) {
+  const { pc } = camEnsurePeer(peerId);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit("cam-offer", { to: peerId, sdp: offer });
+}
+
+function removeCamPeer(peerId) {
+  const entry = camPeers.get(peerId);
+  if (entry) { try { entry.pc.close(); } catch (_) {} camPeers.delete(peerId); }
+  removeTile(peerId);
+}
+
+async function startCall() {
+  if (!camSupported) { toast("Your browser can't access the camera here"); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 } },
+      // Echo cancellation is what keeps everyone's audio from feeding back.
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (_) {
+    toast("Couldn't access your camera/mic — check browser permissions");
+    return;
+  }
+  localCamStream = stream;
+  inCall = true;
+  micEnabled = true;
+  camEnabled = true;
+  videoTiles.hidden = false;
+  upsertTile(me.id, stream, true); // our own tile is always muted (no self-echo)
+  reflectCallUI();
+  socket.emit("cam-join");
+}
+
+function endCall() {
+  if (!inCall) return;
+  inCall = false;
+  socket.emit("cam-leave");
+  [...camPeers.keys()].forEach(removeCamPeer);
+  if (localCamStream) { localCamStream.getTracks().forEach((t) => t.stop()); localCamStream = null; }
+  removeTile(me.id);
+  if (tilesOverlaid) setTilesOverlay(false);
+  videoTiles.hidden = true;
+  reflectCallUI();
+}
+
+/* ---- cam signaling. The peer with the smaller socket id always offers. ---- */
+
+socket.on("cam-existing", ({ peers }) => {
+  peers.forEach((pid) => {
+    camEnsurePeer(pid);
+    if (me.id < pid) camOfferTo(pid);
+  });
+});
+
+socket.on("cam-user-joined", ({ id }) => {
+  if (!inCall) return;
+  camEnsurePeer(id);
+  if (me.id < id) camOfferTo(id);
+});
+
+socket.on("cam-offer", async ({ from, sdp }) => {
+  const entry = camEnsurePeer(from);
+  await entry.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  await camFlush(entry);
+  const answer = await entry.pc.createAnswer();
+  await entry.pc.setLocalDescription(answer);
+  socket.emit("cam-answer", { to: from, sdp: answer });
+});
+
+socket.on("cam-answer", async ({ from, sdp }) => {
+  const entry = camPeers.get(from);
+  if (!entry) return;
+  await entry.pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  await camFlush(entry);
+});
+
+socket.on("cam-ice", async ({ from, candidate }) => {
+  const entry = camPeers.get(from);
+  if (!entry || !candidate) return;
+  const c = new RTCIceCandidate(candidate);
+  if (entry.pc.remoteDescription && entry.pc.remoteDescription.type) {
+    try { await entry.pc.addIceCandidate(c); } catch (_) {}
+  } else entry.pending.push(c);
+});
+
+socket.on("cam-user-left", ({ id }) => removeCamPeer(id));
+
+/* ---- tiles ---- */
+
+function upsertTile(id, stream, isLocal) {
+  let tile = videoTiles.querySelector(`[data-id="${id}"]`);
+  if (!tile) {
+    tile = document.createElement("div");
+    tile.className = "tile";
+    tile.dataset.id = id;
+    const v = document.createElement("video");
+    v.autoplay = true;
+    v.playsInline = true;
+    if (isLocal) v.muted = true; // never play our own mic back
+    const name = document.createElement("span");
+    name.className = "tile-name";
+    tile.appendChild(v);
+    tile.appendChild(name);
+    videoTiles.appendChild(tile);
+  }
+  const v = tile.querySelector("video");
+  if (v.srcObject !== stream) v.srcObject = stream;
+  const u = roomUsers.find((x) => x.id === id);
+  tile.querySelector(".tile-name").textContent =
+    isLocal ? (u?.name ? `${u.name} (you)` : "You") : (u?.name || "Guest");
+  if (u) tile.style.setProperty("--tile-accent", u.color);
+  videoTiles.hidden = false;
+}
+
+function removeTile(id) {
+  const tile = videoTiles.querySelector(`[data-id="${id}"]`);
+  if (tile) tile.remove();
+  if (videoTiles.children.length === 0 && !inCall) videoTiles.hidden = true;
+}
+
+function refreshTileNames() {
+  if (!videoTiles) return;
+  videoTiles.querySelectorAll(".tile").forEach((tile) => {
+    const u = roomUsers.find((x) => x.id === tile.dataset.id);
+    if (!u) return;
+    const isLocal = tile.dataset.id === me?.id;
+    tile.querySelector(".tile-name").textContent = isLocal ? `${u.name} (you)` : u.name;
+    tile.style.setProperty("--tile-accent", u.color);
+  });
+}
+
+function setTilesOverlay(on) {
+  tilesOverlaid = on;
+  const slot = document.getElementById(on ? "tilesOverlaySlot" : "tilesSidebarSlot");
+  slot.appendChild(videoTiles);
+  videoTiles.classList.toggle("overlay", on);
+  document.getElementById("overlayBtn").classList.toggle("active", on);
+}
+
+function reflectCallUI() {
+  document.getElementById("joinVideoBtn").hidden = inCall;
+  document.getElementById("callControls").hidden = !inCall;
+  const micBtn = document.getElementById("micBtn");
+  const camBtn = document.getElementById("camBtn");
+  micBtn.textContent = micEnabled ? "🎤" : "🔇";
+  micBtn.classList.toggle("off", !micEnabled);
+  micBtn.title = micEnabled ? "Mute mic" : "Unmute mic";
+  camBtn.textContent = camEnabled ? "📷" : "🚫";
+  camBtn.classList.toggle("off", !camEnabled);
+  camBtn.title = camEnabled ? "Turn camera off" : "Turn camera on";
+}
+
+/* ------------------------------------------------------------------ */
 /* UI wiring                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -487,6 +679,57 @@ shareScreenBtn.addEventListener("click", () => {
   else startScreenShare();
 });
 
+/* ---- video call controls ---- */
+const joinVideoBtn = document.getElementById("joinVideoBtn");
+if (!camSupported) joinVideoBtn.style.display = "none";
+joinVideoBtn.addEventListener("click", startCall);
+document.getElementById("leaveVideoBtn").addEventListener("click", endCall);
+
+document.getElementById("micBtn").addEventListener("click", () => {
+  if (!localCamStream) return;
+  micEnabled = !micEnabled;
+  localCamStream.getAudioTracks().forEach((t) => (t.enabled = micEnabled));
+  reflectCallUI();
+  const tile = videoTiles.querySelector(`[data-id="${me.id}"]`);
+  if (tile) tile.classList.toggle("mic-off", !micEnabled);
+});
+
+document.getElementById("camBtn").addEventListener("click", () => {
+  if (!localCamStream) return;
+  camEnabled = !camEnabled;
+  localCamStream.getVideoTracks().forEach((t) => (t.enabled = camEnabled));
+  reflectCallUI();
+  const tile = videoTiles.querySelector(`[data-id="${me.id}"]`);
+  if (tile) tile.classList.toggle("cam-off", !camEnabled);
+});
+
+document.getElementById("overlayBtn").addEventListener("click", () => setTilesOverlay(!tilesOverlaid));
+
+/* ---- layout: collapsible chat + theater mode ---- */
+const stage = document.querySelector(".stage");
+let chatOpen = true;
+let theater = false;
+
+function setChat(open) {
+  chatOpen = open;
+  stage.classList.toggle("no-chat", !open);
+  const btn = document.getElementById("chatToggleBtn");
+  btn.classList.toggle("active", !open);
+  btn.title = open ? "Hide chat" : "Show chat";
+  // Keep faces visible when the chat (their home) is hidden.
+  if (!open && inCall && !tilesOverlaid) setTilesOverlay(true);
+}
+document.getElementById("chatToggleBtn").addEventListener("click", () => setChat(!chatOpen));
+document.getElementById("chatCloseBtn").addEventListener("click", () => setChat(false));
+
+document.getElementById("theaterBtn").addEventListener("click", () => {
+  theater = !theater;
+  stage.classList.toggle("theater", theater);
+  document.getElementById("theaterBtn").classList.toggle("active", theater);
+  if (theater) setChat(false);
+  else setChat(true);
+});
+
 document.getElementById("inviteBtn").addEventListener("click", async () => {
   const url = location.href;
   try {
@@ -540,6 +783,7 @@ function currentUserIds() {
 
 function renderUsers(users) {
   roomUsers = users;
+  refreshTileNames();
   isHost = users.find((u) => u.id === me?.id)?.isHost || false;
   const count = users.length;
   document.getElementById("userCount").textContent =
